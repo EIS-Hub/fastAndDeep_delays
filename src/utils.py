@@ -12,7 +12,16 @@ import yaml
 
 torch.set_default_dtype(torch.float64)
 
-import utils_spiketime_et as utils_spiketime
+tau_ratio = 2 # tau_syn / tau_mem
+
+
+if tau_ratio == 1:
+    import utils_spiketime_et as utils_spiketime
+elif tau_ratio == 2:
+    import utils_spiketime_dt as utils_spiketime
+else:
+    raise NotImplementedError("only tau_ratio 1 and 2 are implemented")
+
 
 
 class EqualtimeFunctionEventbased(torch.autograd.Function):
@@ -30,10 +39,15 @@ class EqualtimeFunctionEventbased(torch.autograd.Function):
             output_times: used only in combination with HicannX, that inherits the backward
                 pass from this class, see below for details
         """
+
+        if tau_ratio == 2:
+            neuron_params['tau_mem'] = 2. * neuron_params['tau_syn']
+            neuron_params['g_leak_adapted'] = neuron_params['g_leak'] / 2.
+
         # create causal set
         sort_indices = input_spikes.argsort(1)
         sorted_spikes = input_spikes.gather(1, sort_indices)
-        sorted_weights = input_weights[sort_indices]
+        sorted_weights = input_weights[sort_indices] # sorted input is of size (batch, neurons) so sorted_weights is of size (batch, neurons, neurons)
         # (in each batch) set weights=0 and spiketime=0 for neurons with inf spike time to prevent nans
         mask_of_inf_spikes = torch.isinf(sorted_spikes)
         sorted_spikes_masked = sorted_spikes.clone().detach()
@@ -42,11 +56,12 @@ class EqualtimeFunctionEventbased(torch.autograd.Function):
 
         output_spikes = to_device(torch.ones(len(sorted_spikes), input_weights.size()[1]) * np.inf, device)
 
+
         tmp_output = utils_spiketime.get_spiketime(
             sorted_spikes_masked,
             sorted_weights,
             neuron_params, device)
-
+        # tmp_output is of size (batch, neurons, neurons) contains all the POTENTIAL spiketimes for each neuron
         not_after_last_input = tmp_output < sorted_spikes.unsqueeze(-1)
         not_earlier_than_next = tmp_output > sorted_spikes.unsqueeze(-1).roll(-1, dims=1)
         not_earlier_than_next[:, -1, :] = 0.  # last has no subsequent spike
@@ -54,6 +69,7 @@ class EqualtimeFunctionEventbased(torch.autograd.Function):
         tmp_output[not_after_last_input] = float('inf')
         tmp_output[not_earlier_than_next] = float('inf')
 
+        # find the only EFFECTIVE first spike for each neuron. Size (batch, neurons)
         output_spikes, causal_set_lengths = torch.min(tmp_output, dim=1)
 
         ctx.sim_params = neuron_params
@@ -63,6 +79,7 @@ class EqualtimeFunctionEventbased(torch.autograd.Function):
         if torch.isnan(output_spikes).sum() > 0:
             raise ArithmeticError("There are NaNs in the output times, this means a serious error occured")
         return output_spikes
+
 
     @staticmethod
     def backward(ctx, propagated_error):
@@ -237,7 +254,8 @@ class EqualtimeFunctionHicannx(EqualtimeFunctionEventbased):
 
 class EqualtimeLayer(torch.nn.Module):
     def __init__(self, input_features, output_features, sim_params, weights_init,
-                 device, bias=0):
+                 device):
+
         """Setup up a layer of neurons
 
         Arguments:
@@ -251,7 +269,6 @@ class EqualtimeLayer(torch.nn.Module):
         self.input_features = input_features
         self.output_features = output_features
         self.sim_params = sim_params
-        self.bias = bias
         self.device = device
         self.use_forward_integrator = sim_params.get('use_forward_integrator', False)
         if self.use_forward_integrator:
@@ -260,12 +277,12 @@ class EqualtimeLayer(torch.nn.Module):
             self.sim_params['decay_syn'] = float(np.exp(-sim_params['resolution'] / sim_params['tau_syn']))
             self.sim_params['decay_mem'] = float(np.exp(-sim_params['resolution'] / sim_params['tau_syn']))
 
-        self.weights = torch.nn.Parameter(torch.Tensor(input_features + bias, output_features))
+        self.weights = torch.nn.Parameter(torch.Tensor(input_features, output_features))
 
         if isinstance(weights_init, tuple):
             self.weights.data.normal_(weights_init[0], weights_init[1])
         else:
-            assert weights_init.shape == (input_features + bias, output_features)
+            assert weights_init.shape == (input_features, output_features)
             self.weights.data = weights_init
 
         self.use_hicannx = sim_params.get('use_hicannx', False)
@@ -287,6 +304,110 @@ class EqualtimeLayer(torch.nn.Module):
                                                   self.sim_params,
                                                   self.device,
                                                   output_times)
+
+
+
+class DelayLayer_(torch.nn.Module):
+    def __init__(self, num_neurons, delay_init, device):
+        super(DelayLayer, self).__init__()
+        # Initialize raw delays using Gaussian distribution
+        delay_mean, delay_std = delay_init
+
+        self.raw_delays = torch.nn.Parameter(torch.normal(mean=delay_mean, std=delay_std, size=(num_neurons,)).to(device))
+        # Ensure non-negativity at initialization
+        self.raw_delays.data = torch.relu(self.raw_delays.data)
+
+    @property
+    def delays(self):
+        # Ensure that the delays are always non-negative during training
+        return torch.relu(self.raw_delays)
+
+    def forward(self, input_spikes):
+        # Add non-negative delays to input spikes
+        # Broadcasting the delay across the batch
+        output_spikes = input_spikes + self.delays.unsqueeze(0)  # Unsqueeze for broadcasting
+        return output_spikes
+
+class DelayLayer(torch.nn.Module):
+    def __init__(self, num_neurons, delay_init, device):
+        super(DelayLayer, self).__init__()
+        # Initialize raw delays using Gaussian distribution
+        delay_mean, delay_std = delay_init
+
+        self.raw_delays = torch.nn.Parameter(torch.normal(mean=delay_mean, std=delay_std, size=(num_neurons,)).to(device))
+    @property
+    def delays(self):
+        # Ensure that the delays are always non-negative during training
+        return torch.exp(self.raw_delays)
+
+    def forward(self, input_spikes):
+        # Add non-negative delays to input spikes
+        # Broadcasting the delay across the batch
+        output_spikes = input_spikes + self.delays.unsqueeze(0)  # Unsqueeze for broadcasting
+        return output_spikes
+
+
+class DendriticDelayLayer(torch.nn.Module):
+    def __init__(self, num_neurons, num_dendrites, delay_init, device):
+        super(DendriticDelayLayer, self).__init__()
+        # Initialize raw delays using Gaussian distribution for each neuron and dendrite
+        delay_mean, delay_std = delay_init
+        self.raw_delays = torch.nn.Parameter(
+            torch.normal(mean=delay_mean, std=delay_std, size=(num_neurons, num_dendrites)).to(device))
+
+    @property
+    def delays(self):
+        # Ensure that the delays are always non-negative during training
+        return 0.01 * torch.exp(self.raw_delays)
+
+    def forward(self, input_spikes):
+        # Add non-negative delays to input spikes for each dendrite
+        # The input_spikes tensor is expected to be of shape [batch_size, num_neurons]
+        batch_size, num_neurons = input_spikes.shape
+
+        # Expanding input spikes for each dendrite
+        expanded_spikes = input_spikes.unsqueeze(-1).expand(-1, -1, self.raw_delays.shape[1])  # Shape: [batch_size, num_neurons, num_dendrites]
+
+        # Add dendritic delays
+        delayed_spikes = expanded_spikes + self.delays.unsqueeze(0)  # Shape: [batch_size, num_neurons, num_dendrites]
+
+        # Reshape to [batch_size, num_neurons * num_dendrites]
+        output_spikes = delayed_spikes.reshape(batch_size, -1)
+        return output_spikes
+
+class DelayEqualtimeLayer(torch.nn.Module):
+    def __init__(self, input_features, output_features, sim_params, weights_init, delay_init, device):
+        super(DelayEqualtimeLayer, self).__init__()
+        self.delay_layer = DelayLayer(input_features, delay_init, device)
+        self.equaltime_layer = EqualtimeLayer(input_features, output_features, sim_params, weights_init, device)
+
+    def forward(self, input_spikes):
+        delayed_spikes = self.delay_layer(input_spikes)
+        return self.equaltime_layer(delayed_spikes)
+
+    @property
+    def weights(self):
+        return self.equaltime_layer.weights
+
+class DendriticDelayEqualtimeLayer(torch.nn.Module):
+    def __init__(self, input_features, output_features, num_dendrites, sim_params, weights_init, dendrite_delay_init, device):
+        super(DendriticDelayEqualtimeLayer, self).__init__()
+        # Initialize DendriticDelayLayer with expanded input features
+        self.dendritic_delay_layer = DendriticDelayLayer(input_features, num_dendrites, dendrite_delay_init, device)
+        # Initialize EqualtimeLayer with adjusted input features (input_features * num_dendrites)
+        self.equaltime_layer = EqualtimeLayer(input_features * num_dendrites, output_features, sim_params, weights_init, device)
+
+    def forward(self, input_spikes):
+        # Apply dendritic delays
+        dendritic_delayed_spikes = self.dendritic_delay_layer(input_spikes)
+        # Pass the output through the EqualtimeLayer
+        return self.equaltime_layer(dendritic_delayed_spikes)
+
+    @property
+    def weights(self):
+        # Access the weights of the EqualtimeLayer
+        return self.equaltime_layer.weights
+
 
 
 def bias_inputs(number_biases, t_bias=[0.05]):
@@ -407,10 +528,10 @@ class LossFunction(torch.nn.Module):
         label_idx = to_device(true_label.clone().type(torch.long).view(-1, 1), self.device)
         true_label_times = label_times.gather(1, label_idx).flatten()
         loss = torch.log(torch.exp(-1 * label_times / (self.xi * self.tau_syn)).sum(1)) \
-            + true_label_times / (self.xi * self.tau_syn)
+            + true_label_times / (self.xi * self.tau_syn) # Jimmy: As in the paper (with reduction of log(exp(x)) to x)
         regulariser = self.alpha * torch.exp(true_label_times / (self.beta * self.tau_syn))
         total = loss + regulariser
-        total[true_label_times == np.inf] = 100.
+        total[true_label_times == np.inf] = 100. # Jimmy: to avoid inf in loss but maxval. Maybe issues...
         return total.mean()
 
     def select_classes(self, outputs):

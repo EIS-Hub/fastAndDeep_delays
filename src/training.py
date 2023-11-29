@@ -22,7 +22,11 @@ def running_mean(x, N=30):
     return (cumsum[N:] - cumsum[:-N]) / float(N)
 
 
+# Jimmy : Create a network with all the other implicit function of nn.Module.
+# Add layers with self.layer = utils.EqualtimeLayer
+# One can call net(input) and it will call all the forward function of the layers.
 class Net(torch.nn.Module):
+
     def __init__(self, network_layout, sim_params, device):
         super(Net, self).__init__()
         self.n_inputs = network_layout['n_inputs']
@@ -31,6 +35,14 @@ class Net(torch.nn.Module):
         self.n_biases = network_layout['n_biases']
         self.weight_means = network_layout['weight_means']
         self.weight_stdevs = network_layout['weight_stdevs']
+        # Adding the delays
+        self.use_delay_layer = network_layout.get('use_delay_layer', False)
+        self.delay_mean = network_layout.get('delay_mean', 0.0)
+        self.delay_std = network_layout.get('delay_std', 0.05)
+
+        self.use_dendrites_layer = network_layout.get('use_dendrites_layer', False)
+        self.num_dendrites = network_layout.get('num_dendrites', 0)
+
         self.device = device
 
         if 'bias_times' in network_layout.keys():
@@ -44,15 +56,26 @@ class Net(torch.nn.Module):
         for i in range(self.n_layers):
             bias = utils.to_device(utils.bias_inputs(self.n_biases[i], self.bias_times[i]), device)
             self.biases.append(bias)
+            # Layers initialization
         self.layers = torch.nn.ModuleList()
-        layer = utils.EqualtimeLayer(self.n_inputs, self.layer_sizes[0],
-                                     sim_params, (self.weight_means[0], self.weight_stdevs[0]),
-                                     device, self.n_biases[0])
-        self.layers.append(layer)
-        for i in range(self.n_layers - 1):
-            layer = utils.EqualtimeLayer(self.layer_sizes[i], self.layer_sizes[i + 1],
-                                         sim_params, (self.weight_means[i + 1], self.weight_stdevs[i + 1]),
-                                         device, self.n_biases[i + 1])
+
+        for i in range(self.n_layers):
+            input_features = self.n_inputs if i == 0 else self.layer_sizes[i - 1]
+            output_features = self.layer_sizes[i]
+            weights_init = (self.weight_means[i], self.weight_stdevs[i])
+            bias_size = self.n_biases[i]
+
+            if self.use_delay_layer:
+                if not self.use_dendrites_layer :
+                    layer = utils.DelayEqualtimeLayer(input_features + bias_size, output_features,
+                                                      sim_params, weights_init,(self.delay_mean, self.delay_std), device)
+                else :
+                    layer = utils.DendriticDelayEqualtimeLayer(input_features + bias_size, output_features, self.num_dendrites,
+                                                      sim_params,weights_init, (self.delay_mean, self.delay_std), device)
+            else:
+                layer = utils.EqualtimeLayer(input_features + bias_size, output_features,
+                                             sim_params, weights_init, device)
+
             self.layers.append(layer)
 
         self.rounding_precision = sim_params.get('rounding_precision')
@@ -359,6 +382,7 @@ def load_data(dirname, filename, dataname):
 
 
 def load_config(path):
+    print(path)
     with open(path) as f:
         data = yaml.safe_load(f)
     return data['dataset'], data['neuron_params'], data['network_layout'], data['training_params']

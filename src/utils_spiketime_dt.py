@@ -14,7 +14,6 @@ import torch.nn
 import torch.autograd
 import yaml
 
-
 def get_spiketime(input_spikes, input_weights, neuron_params, device):
     """Calculating spike times, all at once.
 
@@ -40,9 +39,9 @@ def get_spiketime(input_spikes, input_weights, neuron_params, device):
 
     tau_syn = neuron_params['tau_syn']
     tau_mem = neuron_params['tau_mem']
-    assert tau_syn / tau_mem == neuron_params['g_leak'], \
-        f"did you set g_leak according to tau ratio (probably {tau_syn / tau_mem}, " \
-        f"currently {neuron_params['g_leak']})"
+    assert tau_syn / tau_mem == neuron_params['g_leak_adapted'], \
+        f"did you set g_leak_adapted according to tau ratio (probably {tau_syn / tau_mem}, " \
+        f"currently {neuron_params['g_leak_adapted']})"
 
     exponentiated_spike_times_syn = torch.exp(input_spikes / tau_syn)
     exponentiated_spike_times_mem = torch.exp(input_spikes / tau_mem)
@@ -51,7 +50,7 @@ def get_spiketime(input_spikes, input_weights, neuron_params, device):
     eps = 1e-6
     factor_a1 = torch.matmul(exponentiated_spike_times_syn, weights_split) + eps
     factor_a2 = torch.matmul(exponentiated_spike_times_mem, weights_split)
-    factor_c = (neuron_params['threshold'] - neuron_params['leak']) * neuron_params['g_leak']
+    factor_c = (neuron_params['threshold'] - neuron_params['leak']) * neuron_params['g_leak_adapted']
 
     factor_sqrt = torch.sqrt(factor_a2 ** 2 - 4 * factor_a1 * factor_c)
 
@@ -93,7 +92,7 @@ def get_spiketime_derivative(input_spikes, input_weights, neuron_params, device,
     eps = 1e-6
     factor_a1 = torch.matmul(exponentiated_spike_times_syn, causal_weights) + eps
     factor_a2 = torch.matmul(exponentiated_spike_times_mem, causal_weights) + eps
-    factor_c = (neuron_params['threshold'] - neuron_params['leak']) * neuron_params['g_leak']
+    factor_c = (neuron_params['threshold'] - neuron_params['leak']) * neuron_params['g_leak_adapted']
 
     factor_sqrt = torch.sqrt(factor_a2 ** 2 - 4 * factor_a1 * factor_c)
 

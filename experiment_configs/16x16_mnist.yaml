@@ -12,6 +12,11 @@ network_layout:
   n_layers: 2
   weight_means: [0.1, 0.6]
   weight_stdevs: [0.4, 0.8]
+  # New delay layer parameters
+  use_delay_layer: True # Flag to use delay layer
+  delay_mean: 0.1 # Mean of the Gaussian distribution for delays
+  delay_std: 0.05 # Standard deviation of the Gaussian distribution for delays
+
 training_params:
   batch_size: 50
   batch_size_eval: 50

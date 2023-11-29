@@ -1,8 +1,10 @@
 dataset: mnist
 neuron_params:
   g_leak: 1.0
+  g_leak_adapted: 0.0
   leak: 0.0
   tau_syn: 1.0
+  tau_mem: 2.0
   threshold: 1.0
 network_layout:
   bias_times: []
@@ -12,6 +14,11 @@ network_layout:
   n_layers: 2
   weight_means: [0.05, 0.15]
   weight_stdevs: [0.8, 0.8]
+  # New delay layer parameters
+  use_delay_layer: True # Flag to use delay layer
+  delay_mean: 0.1 # Mean of the Gaussian distribution for delays
+  delay_std: 0.05 # Standard deviation of the Gaussian distribution for delays
+
 training_params:
   alpha: 0.005
   batch_size: 80

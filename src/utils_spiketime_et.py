@@ -55,6 +55,9 @@ def get_spiketime(input_spikes, input_weights, neuron_params, device):
     Called from EqualtimeFunction below, for each layer.
     Dimensions are crucial:
         input weights have dimension BATCHESxNxM with N pre and M postsynaptic neurons.
+        return all the potential spike times for every spikes. Even the after firing spike times
+            Dimension output : BATCHESxNxM
+            while only BATCHESx1xM if we only want the only effective first spike time
     """
     n_batch, n_presyn = input_spikes.shape
     n_batch2, n_presyn2, n_postsyn = input_weights.shape
